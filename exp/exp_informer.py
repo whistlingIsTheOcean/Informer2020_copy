@@ -68,6 +68,7 @@ class Exp_Informer(Exp_Basic):
             'WTH':Dataset_Custom,
             'ECL':Dataset_Custom,
             'Solar':Dataset_Custom,
+            'weather':Dataset_Custom,
             'custom':Dataset_Custom,
         }
         Data = data_dict[self.args.data]
