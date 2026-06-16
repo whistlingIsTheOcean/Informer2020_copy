@@ -50,6 +50,9 @@ class Exp_Informer(Exp_Basic):
                 self.args.output_attention,
                 self.args.distil,
                 self.args.mix,
+                self.args.use_rope if hasattr(self.args, 'use_rope') else False,
+                self.args.use_tcn if hasattr(self.args, 'use_tcn') else False,
+                self.args.use_cnn_parallel if hasattr(self.args, 'use_cnn_parallel') else False,
                 self.device
             ).float()
         
@@ -70,6 +73,8 @@ class Exp_Informer(Exp_Basic):
             'Solar':Dataset_Custom,
             'weather':Dataset_Custom,
             'custom':Dataset_Custom,
+            'jena':Dataset_Custom,
+            'jena10min':Dataset_Custom,
         }
         Data = data_dict[self.args.data]
         timeenc = 0 if args.embed!='timeF' else 1
@@ -143,6 +148,10 @@ class Exp_Informer(Exp_Basic):
         if self.args.use_amp:
             scaler = torch.cuda.amp.GradScaler()
 
+        # === [viz] 收集每个 epoch 的 loss ===
+        train_loss_list, vali_loss_list, test_loss_list = [], [], []
+        # ====================================
+
         for epoch in range(self.args.train_epochs):
             iter_count = 0
             train_loss = []
@@ -179,6 +188,12 @@ class Exp_Informer(Exp_Basic):
             vali_loss = self.vali(vali_data, vali_loader, criterion)
             test_loss = self.vali(test_data, test_loader, criterion)
 
+            # === [viz] 记录当前 epoch 的 loss ===
+            train_loss_list.append(train_loss)
+            vali_loss_list.append(vali_loss)
+            test_loss_list.append(test_loss)
+            # ====================================
+
             print("Epoch: {0}, Steps: {1} | Train Loss: {2:.7f} Vali Loss: {3:.7f} Test Loss: {4:.7f}".format(
                 epoch + 1, train_steps, train_loss, vali_loss, test_loss))
             early_stopping(vali_loss, self.model, path)
@@ -190,7 +205,12 @@ class Exp_Informer(Exp_Basic):
             
         best_model_path = path+'/'+'checkpoint.pth'
         self.model.load_state_dict(torch.load(best_model_path))
-        
+
+        # === [viz] 保存每个 epoch 的 loss 用于画图 ===
+        np.save(os.path.join(path, 'epoch_losses.npy'),
+                np.array([train_loss_list, vali_loss_list, test_loss_list]))
+        # ==============================================
+
         return self.model
 
     def test(self, setting):

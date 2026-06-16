@@ -52,6 +52,9 @@ parser.add_argument('--loss', type=str, default='mse',help='loss function')
 parser.add_argument('--lradj', type=str, default='type1',help='adjust learning rate')
 parser.add_argument('--use_amp', action='store_true', help='use automatic mixed precision training', default=False)
 parser.add_argument('--inverse', action='store_true', help='inverse output data', default=False)
+parser.add_argument('--use_rope', action='store_true', help='use RoPE rotary position embedding', default=False)
+parser.add_argument('--use_tcn', action='store_true', help='use TCN (dilated CNN) before encoder', default=False)
+parser.add_argument('--use_cnn_parallel', action='store_true', help='use parallel CNN branch merged with encoder output', default=False)
 
 parser.add_argument('--use_gpu', type=bool, default=True, help='use gpu')
 parser.add_argument('--gpu', type=int, default=0, help='gpu')
@@ -77,6 +80,8 @@ data_parser = {
     'ECL':{'data':'ECL.csv','T':'MT_320','M':[321,321,321],'S':[1,1,1],'MS':[321,321,1]},
     'Solar':{'data':'solar_AL.csv','T':'POWER_136','M':[137,137,137],'S':[1,1,1],'MS':[137,137,1]},
     'weather':{'data':'weather_processed.csv','T':'Temperature (C)','M':[19,19,19],'S':[1,1,1],'MS':[19,19,1]},
+    'jena':  {'data':'jena_processed.csv',  'T':'T (degC)',   'M':[14,14,14],'S':[1,1,1],'MS':[14,14,1]},
+    'jena10min':{'data':'jena_10min.csv',  'T':'T (degC)',   'M':[14,14,14],'S':[1,1,1],'MS':[14,14,1]},
 }
 if args.data in data_parser.keys():
     data_info = data_parser[args.data]

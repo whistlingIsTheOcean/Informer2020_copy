@@ -7,6 +7,26 @@ import numpy as np
 from math import sqrt
 from utils.masking import TriangularCausalMask, ProbMask
 
+
+def _logsparse_mask(L_Q, L_K, device, causal=False):
+    """生成 LogSparse 注意力 mask。
+    位置 i (query) 只 attend 位置 j (key), 其中 |i-j| 是 2 的幂 (1, 2, 4, 8, 16...)。
+    复杂度: O(L log L)
+    """
+    mask = torch.ones(L_Q, L_K, dtype=torch.bool, device=device)  # True = 被 mask
+    valid_dists = [0]
+    d = 1
+    while d < max(L_Q, L_K):
+        valid_dists.append(d)
+        d *= 2
+    for j in range(L_K):
+        q_start = j if causal else 0
+        for i in range(q_start, L_Q):
+            if abs(i - j) in valid_dists:
+                mask[i, j] = False
+    return mask
+
+
 class FullAttention(nn.Module):
     def __init__(self, mask_flag=True, factor=5, scale=None, attention_dropout=0.1, output_attention=False):
         super(FullAttention, self).__init__()
@@ -125,9 +145,47 @@ class ProbAttention(nn.Module):
         return context.transpose(2,1).contiguous(), attn
 
 
+class LogSparseAttention(nn.Module):
+    """LogSparse Attention — 每个位置只 attend 距离为 2 的幂的键。
+    复杂度 O(L log L)，无额外可学习参数，掩码在每轮 forward 根据序列长度动态生成。
+    """
+
+    def __init__(self, mask_flag=True, factor=5, scale=None, attention_dropout=0.1, output_attention=False):
+        super(LogSparseAttention, self).__init__()
+        self.scale = scale
+        self.mask_flag = mask_flag
+        self.output_attention = output_attention
+        self.dropout = nn.Dropout(attention_dropout)
+
+    def forward(self, queries, keys, values, attn_mask):
+        B, L, H, E = queries.shape
+        _, S, _, D = values.shape
+        scale = self.scale or 1. / sqrt(E)
+
+        scores = torch.einsum("blhe,bshe->bhls", queries, keys)
+
+        # 先叠加因果 mask（如果需要）
+        if self.mask_flag:
+            if attn_mask is None:
+                attn_mask = TriangularCausalMask(B, L, device=queries.device)
+            scores.masked_fill_(attn_mask.mask, -np.inf)
+
+        # 再叠加 LogSparse mask
+        sparse_mask = _logsparse_mask(L, S, queries.device, causal=self.mask_flag)
+        scores.masked_fill_(sparse_mask.unsqueeze(0).unsqueeze(0), -np.inf)
+
+        A = self.dropout(torch.softmax(scale * scores, dim=-1))
+        V = torch.einsum("bhls,bshd->blhd", A, values)
+
+        if self.output_attention:
+            return (V.contiguous(), A)
+        else:
+            return (V.contiguous(), None)
+
+
 class AttentionLayer(nn.Module):
     def __init__(self, attention, d_model, n_heads, 
-                 d_keys=None, d_values=None, mix=False):
+                 d_keys=None, d_values=None, mix=False, use_rope=False):
         super(AttentionLayer, self).__init__()
 
         d_keys = d_keys or (d_model//n_heads)
@@ -140,6 +198,7 @@ class AttentionLayer(nn.Module):
         self.out_projection = nn.Linear(d_values * n_heads, d_model)
         self.n_heads = n_heads
         self.mix = mix
+        self.use_rope = use_rope
 
     def forward(self, queries, keys, values, attn_mask):
         B, L, _ = queries.shape
@@ -149,6 +208,9 @@ class AttentionLayer(nn.Module):
         queries = self.query_projection(queries).view(B, L, H, -1)
         keys = self.key_projection(keys).view(B, S, H, -1)
         values = self.value_projection(values).view(B, S, H, -1)
+
+        if self.use_rope:
+            queries, keys = apply_rope(queries, keys)
 
         out, attn = self.inner_attention(
             queries,
@@ -161,3 +223,25 @@ class AttentionLayer(nn.Module):
         out = out.view(B, L, -1)
 
         return self.out_projection(out), attn
+
+
+def apply_rope(q, k):
+    """RoPE (Rotary Position Embedding) — 对 Q 和 K 施加旋转变换
+    q, k: [B, L, H, D]
+    """
+    B, L, H, D = q.shape
+    device = q.device
+    # 位置频率: θ_i = 1 / 10000^(2i/D)
+    freqs = 1.0 / (10000.0 ** (torch.arange(0, D, 2, device=device).float() / D))
+    positions = torch.arange(L, device=device).float()
+    angles = positions[:, None] * freqs[None, :]  # [L, D/2]
+    cos, sin = torch.cos(angles), torch.sin(angles)
+
+    def rotate(x):
+        # x: [B, L, H, D] -> 成对旋转
+        x_ = x.reshape(B, L, H, D // 2, 2)
+        x_cos = x_[..., 0] * cos[:, None, :] - x_[..., 1] * sin[:, None, :]
+        x_sin = x_[..., 0] * sin[:, None, :] + x_[..., 1] * cos[:, None, :]
+        return torch.stack([x_cos, x_sin], dim=-1).reshape(B, L, H, D)
+
+    return rotate(q), rotate(k)

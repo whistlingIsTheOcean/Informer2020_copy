@@ -2,6 +2,53 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
+class TCNBlock(nn.Module):
+    """可选 CNN 前端 — 多层膨胀卷积提取局部时序模式。
+    dilations = [1, 2, 4, 8] 覆盖 1+2+4+8=15 步感受野。
+    """
+    def __init__(self, d_model, kernel_size=3, dropout=0.1):
+        super().__init__()
+        dilations = [1, 2, 4, 8]
+        layers = []
+        for d in dilations:
+            layers.append(nn.Conv1d(d_model, d_model, kernel_size,
+                                    dilation=d, padding=d))
+            layers.append(nn.BatchNorm1d(d_model))
+            layers.append(nn.GELU())
+            layers.append(nn.Dropout(dropout))
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x):       # [B, L, D]
+        return self.net(x.transpose(1, 2)).transpose(1, 2)
+
+
+class CNNParallel(nn.Module):
+    """并行 CNN 分支 — 从原始输入独立提取特征, 与 Attention 编码器输出相加。
+    输入 [B, L, enc_in], 输出 [B, L, d_model], 采用残差式合并。
+    不使用 BatchNorm (避免破坏时序分布), 用 LayerNorm 替代。
+    """
+    def __init__(self, enc_in, d_model, dropout=0.1):
+        super().__init__()
+        self.conv1 = nn.Conv1d(enc_in, d_model//2, kernel_size=7, padding=3)
+        self.ln1 = nn.LayerNorm(d_model//2)
+        self.conv2 = nn.Conv1d(d_model//2, d_model, kernel_size=5, padding=2)
+        self.ln2 = nn.LayerNorm(d_model)
+        self.conv3 = nn.Conv1d(d_model, d_model, kernel_size=3, padding=1)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):       # [B, L, enc_in]
+        out = self.conv1(x.transpose(1, 2))            # [B, d/2, L]
+        out = self.ln1(out.transpose(1, 2))             # [B, L, d/2]
+        out = F.gelu(out)
+        out = self.conv2(out.transpose(1, 2))           # [B, d, L]
+        out = self.ln2(out.transpose(1, 2))             # [B, L, d]
+        out = F.gelu(out)
+        out = self.conv3(out.transpose(1, 2))           # [B, d, L]
+        out = self.dropout(out.transpose(1, 2))         # [B, L, d]
+        return out
+
+
 class ConvLayer(nn.Module):
     def __init__(self, c_in):
         super(ConvLayer, self).__init__()
